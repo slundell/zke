@@ -1,21 +1,21 @@
 import serial
 import time
+import matplotlib.pyplot as plt
 
 baudrate = 9600
 port = "/dev/interceptty"
 # port = "/dev/ttyUSB0"
 PKT_START_BYTE = 0xFA
 PKT_END_BYTE = 0xF8
-PKT_SMALLEST = 10
 
 
-stop_pkt_1 = [0xfa, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xf8]
-#stop_pkt_2 = [0xfa, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xf8]
+
+stop_pkt = [0xfa, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xf8]
 connect_pkt = [0xfa, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0xf8]
 disconnect_pkt = [0xfa, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0xf8]
 
 
-ser = serial.Serial(port, baudrate, timeout=5)
+ser = None
 
 commands = {
     "D-CC": 0x01,
@@ -48,41 +48,21 @@ states = {
 
 
 
-protocol = list()
-# protocol.append({"command": "Disconnect"})
-# protocol.append({"command": "Connect"})
+protocol_nmc_2p4s_100soc = [
+    #{"command": "D-CC", "current": 5, "voltage": 12.0, "cutoff_current": .2},
+    {"command": "C-CV", "current": 5, "voltage": 16.8, "cutoff_current": .2},
+    {"command": "D-CC", "current": 5, "voltage": 12.6, "cutoff_current": .2},
+    {"command": "C-CV", "current": 5, "voltage": 16.8, "cutoff_current": .2},
+]
 
-protocol.append({"command": "Stop"})
+protocol = protocol_nmc_2p4s_100soc
 
-protocol.append(
-    {
-        # C-CV 0.1A 2.4V 0.05A cutoff
-        "command": "C-CV",
-        "current": 5,
-        "voltage": 16.8,
-        "cutoff_current": .1
-    }
-)
+log_list = list()
+log_filename = "charge.log"
+log_commit_last = 0
+log_commit_interval = 60
 
-protocol.append(
-    {
-        "command": "D-CC",
-        "current": 5,
-        "voltage": 12,
-        "cutoff_current": 0.1
-    }
-)
-protocol.append(
-    {
-        # C-CV 0.1A 2.4V 0.05A cutoff
-        "command": "C-CV",
-        "current": 5,
-        "voltage": 16.8,
-        "cutoff_current": .1
-    }
-)
-
-# protocol = [{"command": i} for i in range(0xFF)]
+last_pkt = 0
 
 
 def generate_checksum(buf):
@@ -93,9 +73,6 @@ def generate_checksum(buf):
 
 
 def decode_volts(b1: int, b2: int):
-  # b1 = int(pkt[3])
-  # b2 = int(pkt[4])
-  # print(f"0x{b1:02X} 0x{b2:02X}")
   return float(b1 * .240 + b2 * .001)
 
 
@@ -103,32 +80,21 @@ def encode_volts(volts: float):
   volts = volts / 10.
   b1 = int(volts / .240)
   b2 = int((volts - b1 * .240) / .001)
-
-  print(f"0x{b1:02X} 0x{b2:02X}")
   return (b1, b2)
 
 
 def encode_current(amps: float, scale: float = 1.):
   amps = amps * scale
-
   b1 = int(amps / 2.40)
   b2 = int((amps - b1 * 2.40) / .01)
-
-  print(f"0x{b1:02X} 0x{b2:02X}")
   return (b1, b2)
 
 
-
 def decode_amps(b1, b2):
-  # b1 = int(pkt[1])
-  # b2 = int(pkt[2])
   return float(b1 * 2.40 + b2 * .01)
 
 
 def decode_mamphours(b1, b2):
-  # b1 = int(pkt[1])
-  # b2 = int(pkt[2])
-  # print(f"0x{b1:02X} 0x{b2:02X}")
   return int((b1 * 240) + b2)
 
 
@@ -143,134 +109,318 @@ def decode_state(s):
 
 
 def execute_cmd(cmd):
-  print(cmd)
+
   cmd_code = commands[cmd["command"]]
 
   pkt = [0 for _ in range(10)]
   pkt[0] = PKT_START_BYTE
   pkt[1] = cmd_code
 
-  if (cmd["command"] == "C-CV"):
-    (c1, c2) = encode_current(cmd["current"])
-    (v1, v2) = encode_volts(cmd["voltage"])
-    (o1, o2) = encode_current(cmd["cutoff_current"])
+  if (cmd["command"] in ["C-CV", "D-CC"]):
+    (pkt[2], pkt[3]) = encode_current(cmd["current"])
+    (pkt[4], pkt[5]) = encode_volts(cmd["voltage"])
+    (pkt[6], pkt[7]) = encode_current(cmd["cutoff_current"])
 
-    pkt[2] = c1
-    pkt[3] = c2
-    pkt[4] = v1
-    pkt[5] = v2
-    pkt[6] = o1
-    pkt[7] = o2
-
-  if (cmd["command"] == "D-CC"):
-    (c1, c2) = encode_current(cmd["current"])
-    (v1, v2) = encode_volts(cmd["voltage"])
-    (o1, o2) = encode_current(cmd["cutoff_current"])
-
-    pkt[2] = c1
-    pkt[3] = c2
-    pkt[4] = v1
-    pkt[5] = v2
-    pkt[6] = o1
-    pkt[7] = o2
+  elif (cmd["command"] in ["Stop", "Disconnect", "Connect"]):
+    pass
 
   else:
-    pass
+    print(f"Unknown command: {cmd['command']}")
+    # TODO: will fail on cmd code lookup above
+    return
+
 
   pkt[8] = generate_checksum(pkt[1:8])
   pkt[9] = PKT_END_BYTE
 
+  print(f"Executing: {cmd['command']}")
+  pretty_print_packet(pkt)
 
-  # print(f"Executing command: {cmd['command']}")
-  print("[>] " + ' '.join(['0x%02X' % b for b in pkt]))
 
-  written = ser.write(pkt)
-  ser.flush()
-  print(f"Written: {written}")
+  written = 0
+  while (written != 10):
+    written = ser.write(pkt)
+    ser.flush()
 
-  if (written != 10):
-    print(f"Wrote {written} bytes")
+
+def read_log(filename):
+  global log_list
+
+  print("Writing logfile")
+  file = open(filename, "r")
+  file.readline()  # skip header
+
+  for line in file.readlines():
+    d = line.split()
+    log_list.append(d)
+
+  print(log_list)
+
+  file.close()
+
+
+def log(timestamp, state, voltage, current, mah):
+  global log_commit_last, log_commit_interval, log_filename, log_list
+
+  log_list.append([timestamp, state, voltage, current, mah])
+  if (log_commit_last + log_commit_interval < timestamp):
+    print("Writing logfile")
+    file = open(log_filename, "w")
+    file.write("# Timestamp; State; Voltage (V), Current (A), Capacity (mAh)\n")
+    for line in log_list:
+      file.write(f"{int(line[0]):d};{line[1]:s};{line[2]:.03f};{line[3]:.03f};{line[4]:d}\n")
+    file.close()
+    log_commit_last = timestamp
+
+
+def pretty_print_packet(pkt):
+  if (pkt is None):
+    print("[PACKET] <None>")
+  else:
+    print("[PACKET] " + ' '.join(['0x%02X' % b for b in pkt]) + f" (size: {len(pkt)})")
+
+
+def pretty_print_state(state, volt, amps, mah):
+
+  if (mah < 3000):
+    print(f"{state} {volt:.3f}V {amps:.3f}A {mah:d}mAh")
+  else:
+    print(f"{state} {volt:.3f}V {amps:.3f}A {mah/1000:d}Ah")
+
+
+buf = list()
+
+
+def read_data():
+  global buf
+
+  try:
+    r = ser.read(19)
+    buf += r
+  except serial.serialutil.SerialException as e:
+    print(e)
+    return None
+
+
+  # if (len(buf) > 0):
+    # print("[BUFFER] " + ' '.join(['0x%02X' % b for b in buf]))
+
+  if (PKT_START_BYTE in buf):
+    start = buf.index(PKT_START_BYTE)
+    buf = buf[start:]
+    if (PKT_END_BYTE in buf):
+      end = buf.index(PKT_END_BYTE)
+      start = len(buf[end::-1]) - 1 - buf[end::-1].index(PKT_START_BYTE)
+      crc_read = buf[end - 1]
+      pkt = buf[start + 1:end - 1]
+      buf = buf[end + 1:]
+      crc_calc = generate_checksum(pkt)
+
+      if (crc_calc == crc_read):
+        return pkt
+      else:
+        print("CRC mismatch")
+        pretty_print_packet(pkt)
+        print(f"crc_calc: 0x{crc_calc:02X} crc_read: 0x{crc_read:02X} ")
+        return None
+
+
+
+
+def parse_packet(pkt):
+
+  timestamp = time.time()
+
+  if (len(pkt) == 16):
+    state = decode_state(pkt[0])
+    if (state in ["Done", "Idle", "C-CV", "D-CC", ]):
+      amps = decode_amps(pkt[1], pkt[2])
+      volt = decode_volts(pkt[3], pkt[4])
+      mah = decode_mamphours(pkt[5], pkt[6])
+
+      return (timestamp, state, volt, amps, mah)
+
+    #elif (state == "Done"):
+    #  pretty_print_packet(pkt)
+    #  print("Done")
+    #  return None
+
+    else:
+      print(f"Unknown state: {state}")
+      pretty_print_packet(pkt)
+      return None
+  else:
+    print(f"Unexpected package size: {len(pkt):d}")
+    pretty_print_packet(pkt)
+    return None
+
+
+def is_connected():
+  global last_pkt
+  return (ser is not None) and (last_pkt + 20 > time.time())
+
+
+def disconnect():
+  global ser
+
+  if ser is None:
+    return
+
+  execute_cmd({"command": "Disconnect"})
+  ser.close()
+  ser = None
+
+
+
+def connect():
+  global ser, last_pkt
+
+
+  print(f"Connecting to {port}")
+  try:
+    if ser is not None:
+      ser.close()
+
+    ser = serial.Serial(port, baudrate, timeout=5)
+
+  except serial.SerialException as e:
+    print(e)
+    ser = None
+    return
+
+  print("Listening for activity")
+
+  execute_cmd({"command": "Connect"})
+  b = None
+
+  while (b is None or len(b) == 0):
+    execute_cmd({"command": "Connect"})
+    try:
+      b = ser.read()
+      pretty_print_packet(b)
+    except serial.SerialException as e:
+      print(e)
+      continue
+
+  pretty_print_packet(b)
+
+  execute_cmd({"command": "Stop"})
+
+
+  print("Waiting for valid data")
+
+  pkt = read_data()
+  while (pkt is None):
+    pretty_print_packet(pkt)
+    pkt = read_data()
+
+  pretty_print_packet(pkt)
+  (last_pkt, _, _, _, _) = parse_packet(pkt)
+
+
+
+def reconnect():
+  disconnect()
+  connect()
+
+
+def generate_report(log):
+
+   curr_state = None
+   state_start_time = None
+   timestamps = list()
+   voltages = list()
+   currents = list()
+   capacities = list()
+
+   for line in log:
+     (timestamp, state, voltage, current, capacity) = line
+
+     if state != curr_state:
+       if curr_state in ['C-CV', 'D-CC', 'D-CP']:
+         #  render
+         pass
+
+       timestamps = list()
+       voltage = list()
+       current = list()
+       capacity = list()
+       curr_state = state
+       state_start_time = timestamp
+
+
+     timestamps.append(timestamp - state_start_time)
+     voltages.append(voltage)
+     currents.append(current)
+     capacities.append(capacity)
+
+
+
+
+
+
+
+#   plt.plot
+
 
 
 def main():
+  global protocol, last_pkt
   protocol_idx = 0
-  wait = 0
+  protocol_idx_next = 0
+
+  repeat = 0
   state = "Idle"
-  buf = list()
-  #  ser.write(disconnect_pkt)
-  #  ser.write(connect_pkt)
-  execute_cmd(protocol[0])
+  last_pkt = 0
+
+  #protocol = [{"command": "Disconnect"}, {"command": "Connect"}, {"command": "Stop"}] + protocol
+
+  read_log("charge.log")
+  generate_report(log_list)
+
+  connect()
 
   while protocol_idx < len(protocol):
 
-    if ser.in_waiting > 0:
 
-      try:
-        r = ser.read(19)
-        buf += r
-      except serial.serialutil.SerialException as e:
-        print(e)
-
-
-      # if (len(buf) > 0):
-        # print("[BUFFER] " + ' '.join(['0x%02X' % b for b in buf]))
-
-      if (PKT_START_BYTE in buf):
-        wait += 1
-
-        start = buf.index(PKT_START_BYTE)
-        buf = buf[start:]
-
-        if (PKT_END_BYTE in buf):
-
-          end = buf.index(PKT_END_BYTE)
-          start = len(buf[end::-1]) - 1 - buf[end::-1].index(PKT_START_BYTE)
-
-
-          crc_read = buf[end - 1]
-          pkt = buf[start + 1:end - 1]
-          buf = buf[end + 1:]
-
-
-
-          crc_calc = generate_checksum(pkt)
-
-          if (crc_calc == crc_read):
-
-            if (len(pkt) == 16):
-              state = decode_state(pkt[0])
-              if (state in ["Idle", "C-CV", "D-CC", ]):
-                amps = decode_amps(pkt[1], pkt[2])
-                volt = decode_volts(pkt[3], pkt[4])
-                mah = decode_mamphours(pkt[5], pkt[6])
-
-                print(f"{state} {volt:.3f}V {amps:.3f}A {mah:d}mAh")
-
-              elif (state == "Done"):
-                print("Done")
-
-              else:
-                print(f"Unknown state: {state}")
-                print("[PACKET] " + ' '.join(['0x%02X' % b for b in pkt]))
-            else:
-              print(f"Unexpected package size: {len(pkt):d}")
-              print("[PACKET] " + ' '.join(['0x%02X' % b for b in pkt]))
-          else:
-            print("CRC mismatch")
-            print("[PACKET] " + ' '.join(['0x%02X' % b for b in pkt]))
-            print(f"crc_calc: 0x{crc_calc:02X} crc_read: 0x{crc_read:02X} ")
-    else:
-      time.sleep(.01)
-
-
-    if ((wait >= 2) and ((state == "Idle") or (state == "Done"))):
-
-      protocol_idx += 1
-
-      if (protocol_idx >= len(protocol)):
-        break
+    if not is_connected():
+      reconnect()
       execute_cmd(protocol[protocol_idx])
-      wait = 0
+
+    pkt = read_data()
+
+    if (pkt is not None):
+      last_pkt = time.time()
+
+      p = parse_packet(pkt)
+      if (p is not None):
+
+        (timestamp, state, voltage, current, capacity) = p
+
+        # pretty_print_packet(pkt)
+        pretty_print_state(state, voltage, current, capacity)
+        # print(f"Repeat: {repeat}")
+        log(timestamp, state, voltage, current, capacity)
+
+        if (state != protocol[protocol_idx]["command"]):
+
+          if (repeat < 10):
+            execute_cmd(protocol[protocol_idx])
+            repeat += 1
+          else:
+            print("Unable to set state")
+            exit(1)
+        else:
+          repeat = 0
+          protocol_idx_next = protocol_idx + 1
+
+        if (state in ["Done"]):
+          protocol_idx = protocol_idx_next
+
+
+      last_pkt = time.time()
+
+    time.sleep(.01)  # be nice
 
 
 
@@ -440,6 +590,14 @@ def main():
 
 # # Auto test
  [>] 0xfa 0x01 0x00 0x0a 0x00 0x50 0x00 0x00 0x5b 0xf8 0xfa 0x07 0x00 0x0a 0x00 0x50 0x00 0x00 0x5d 0xf8
+
+
+
+# Issues
+
+  # # Connection lock-ups
+    Sometimes the device does not respond to connection attempts. Niether on ttyUSB0 and interceptty. If EB.exe is used through wine to connect+disconnect on interceptty and then connect on ttyUSB0 then the device becomes responsive again. Maybe some RTC/CTS? ser.close()?
+
 
 """
 
