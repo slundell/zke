@@ -3,8 +3,9 @@ import time
 import matplotlib.pyplot as plt
 
 baudrate = 9600
-port = "/dev/interceptty"
-# port = "/dev/ttyUSB0"
+# port = "/dev/interceptty"
+port = "/dev/ttyUSB0"
+# port = "/dev/ttyUSB1"
 PKT_START_BYTE = 0xFA
 PKT_END_BYTE = 0xF8
 
@@ -18,10 +19,10 @@ disconnect_pkt = [0xfa, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0xf8]
 ser = None
 
 commands = {
-    "D-CC": 0x01,
     "Stop": 0x02,
     "Connect": 0x05,
     "Disconnect": 0x06,
+    "D-CC": 0x01,
     "D-CP": 0x11,
     "C-NiMh": 0x21,
     "C-NiCd": 0x31,
@@ -140,21 +141,30 @@ def execute_cmd(cmd):
   written = 0
   while (written != 10):
     written = ser.write(pkt)
+    print(f"Wrote: {written}")
     ser.flush()
+
+  #for b in pkt:
+    #  print(f"0x{b:02x}")
+    #  ser.write([b])
+    #  ser.flush()
+    #  print(ser.in_waiting)
+    #  time.sleep(.1)
+
 
 
 def read_log(filename):
   global log_list
 
-  print("Writing logfile")
+  print("Reading logfile")
   file = open(filename, "r")
   file.readline()  # skip header
 
   for line in file.readlines():
-    d = line.split()
-    log_list.append(d)
+    d = line.split(';')
+    log_list.append([int(d[0]), str(d[1]), float(d[2]), float(d[3]), int(d[4])])
 
-  print(log_list)
+  # print(log_list)
 
   file.close()
 
@@ -288,40 +298,75 @@ def connect():
     ser = None
     return
 
-  print("Listening for activity")
+  # print("Listening for activity")
 
-  execute_cmd({"command": "Connect"})
+  #b = ser.read()
+  #pretty_print_packet(b)
+
+
   b = None
-
   while (b is None or len(b) == 0):
     execute_cmd({"command": "Connect"})
     try:
       b = ser.read()
-      pretty_print_packet(b)
     except serial.SerialException as e:
       print(e)
-      continue
 
-  pretty_print_packet(b)
-
-  execute_cmd({"command": "Stop"})
+    pretty_print_packet(b)
+  print("Connected")
 
 
-  print("Waiting for valid data")
+  #b = None
 
-  pkt = read_data()
-  while (pkt is None):
-    pretty_print_packet(pkt)
-    pkt = read_data()
+  #while (b is None or len(b) == 0):
+   # execute_cmd({"command": "Connect"})
+  #execute_cmd({"command": "Stop"})
+    #for i in range(0xFF):
+      #ser.write([0xfa, i, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, i, 0xf8])
 
-  pretty_print_packet(pkt)
-  (last_pkt, _, _, _, _) = parse_packet(pkt)
+
+    #try:
+  #b = ser.read()
+      #print(b)
+      #pretty_print_packet(b)
+    #except serial.SerialException as e:
+     # print(e)
+      #continue
+
+  #pretty_print_packet(b)
+
+  execute_cmd({"command": "C-CV", "current": 5, "voltage": 16.8, "cutoff_current": .2})
+
+  # execute_cmd({"command": "Stop"})
+
+
+  #print("Waiting for valid data")
+
+  #pkt = read_data()
+  #while (pkt is None):
+  #  pretty_print_packet(pkt)
+  #  pkt = read_data()
+
+  #pretty_print_packet(pkt)
+  #(last_pkt, _, _, _, _) = parse_packet(pkt)
 
 
 
 def reconnect():
   disconnect()
   connect()
+
+
+def print_port_status():
+  # print(ser)
+  print("Port status:", end='')
+  print(" BREAK: " + ("ON" if ser.break_condition else "OFF"), end='')
+  print("  RTS: " + ("ON" if ser.rts else "OFF"), end='')
+  print("  DTR: " + ("ON" if ser.dtr else "OFF"), end='')
+  # print("  CTS: " + ("ON" if ser.cts else "OFF"), end='')
+  # print("  RI: " + ("ON" if ser.ri else "OFF"), end='')
+  # print("  CD: " + ("ON" if ser.cd else "OFF"), end='')
+  print()
 
 
 def generate_report(log):
@@ -358,8 +403,6 @@ def generate_report(log):
 
 
 
-
-
 #   plt.plot
 
 
@@ -373,24 +416,22 @@ def main():
   state = "Idle"
   last_pkt = 0
 
-  #protocol = [{"command": "Disconnect"}, {"command": "Connect"}, {"command": "Stop"}] + protocol
+  connect()
 
   read_log("charge.log")
   generate_report(log_list)
 
-  connect()
-
+  command_accepted = False
   while protocol_idx < len(protocol):
 
-
     if not is_connected():
-      reconnect()
-      execute_cmd(protocol[protocol_idx])
+      connect()
 
     pkt = read_data()
 
     if (pkt is not None):
       last_pkt = time.time()
+      print_port_status()
 
       p = parse_packet(pkt)
       if (p is not None):
@@ -399,23 +440,33 @@ def main():
 
         # pretty_print_packet(pkt)
         pretty_print_state(state, voltage, current, capacity)
+
         # print(f"Repeat: {repeat}")
-        log(timestamp, state, voltage, current, capacity)
 
-        if (state != protocol[protocol_idx]["command"]):
 
-          if (repeat < 10):
-            execute_cmd(protocol[protocol_idx])
-            repeat += 1
-          else:
-            print("Unable to set state")
-            exit(1)
+        if repeat < 5 and not command_accepted:
+          execute_cmd(protocol[protocol_idx])
+          repeat += 1
         else:
-          repeat = 0
-          protocol_idx_next = protocol_idx + 1
+          if (state in ["Done"]):
+            protocol_idx = protocol_idx_next
 
-        if (state in ["Done"]):
-          protocol_idx = protocol_idx_next
+          if (state != protocol[protocol_idx]["command"]):
+            command_accepted = False
+            if (repeat < 10):
+              if (repeat > 3):
+                execute_cmd({"command": "Stop"})
+              execute_cmd(protocol[protocol_idx])
+              repeat += 1
+            else:
+              connect()
+              repeat = 0
+          else:
+            repeat = 0
+            command_accepted = True
+            protocol_idx_next = protocol_idx + 1
+
+      log(timestamp, state, voltage, current, capacity)
 
 
       last_pkt = time.time()
@@ -599,7 +650,57 @@ def main():
     Sometimes the device does not respond to connection attempts. Niether on ttyUSB0 and interceptty. If EB.exe is used through wine to connect+disconnect on interceptty and then connect on ttyUSB0 then the device becomes responsive again. Maybe some RTC/CTS? ser.close()?
 
 
+[RX]  .... etc  0x00 0x02 0x14 0x07 0x00 0x00 0x14 0x06 0x00 0xf8
+
+[TX]  0xfa 0x05 0x00 0x00 0x00 0x00 0x00 0x00 0x05 0xf8 [Connect packet]
+Mine  0xFA 0x05 0x00 0x00 0x00 0x00 0x00 0x00 0x05 0xF8
+
+[RX]  0xfa 0x07 0x00 0x00 0x45 0x62 0x00 0x23 0x00 0x00 0x02 0x14 0x07 0x00 0x00 0x14 0x06 0x00 0xf8 [Idle]
+[RX]  0xfa 0x07 0x00 0x00 0x45 0x62 0x00 0x23 0x00 0x00 0x02 0x14 0x07 0x00 0x00 0x14 0x06 0x00 0xf8 [Idle]
+[RX]  0xfa 0x07 0x00 0x00 0x45 0x62 0x00 0x23 0x00 0x00 0x02 0x14 0x07 0x00 0x00 0x14 0x06 0x00 0xf8 [Idle]
+[RX]  0xfa 0x07 0x00 0x00 0x45 0x62 0x00 0x23 0x00 0x00 0x02 0x14 0x07 0x00 0x00 0x14 0x06 0x00 0xf8 [Idle]
+[RX]  0xfa 0x07 0x00 0x00 0x45 0x62 0x00 0x23 0x00 0x00 0x02 0x14 0x07 0x00 0x00 0x14 0x06 0x00 0xf8 [Idle]
+[RX]  0xfa 0x07 0x00 0x00 0x45 0x62 0x00 0x23 0x00 0x00 0x02 0x14 0x07 0x00 0x00 0x14 0x06 0x00 0xf8 [Idle]
+[RX]  0xfa 0x07 0x00 0x00 0x45 0x62 0x00 0x23 0x00 0x00 0x02 0x14 0x07 0x00 0x00 0x14 0x06 0x00 0xf8 [Idle]
+[RX]  0xfa 0x07 0x00 0x00 0x45 0x62 0x00 0x23 0x00 0x00 0x02 0x14 0x07 0x00 0x00 0x14 0x06 0x00 0xf8 [Idle]
+
+[TX]  0xfa 0x71 0x02 0x14 0x07 0x00 0x00 0x14 0x74 0xf8 [C-CV cmd]
+
+[RX]  0xfa 0x11 0x00 0x00 0x45 0x62 0x00 0x00 0x00 0x00 0x02 0x14 0x07 0x00 0x00 0x14 0x06 0x35 0xf8 [C-CV]
+[RX]  0xfa 0x11 0x02 0x14 0x45 0x66 0x00 0x01 0x00 0x00 0x02 0x14 0x07 0x00 0x00 0x14 0x06 0x26 0xf8 [C-CV]
+[RX]  0xfa 0x11 0x02 0x14 0x45 0x69 0x00 0x04 0x00 0x00 0x02 0x14 0x07 0x00 0x00 0x14 0x06 0x2c 0xf8 [C-CV]
+[RX]  0xfa 0x11 0x02 0x14 0x45 0x69 0x00 0x07 0x00 0x00 0x02 0x14 0x07 0x00 0x00 0x14 0x06 0x2f 0xf8 [C-CV]
+[RX]  0xfa 0x11 0x02 0x14 0x45 0x6d 0x00 0x0a 0x00 0x00 0x02 0x14 0x07 0x00 0x00 0x14 0x06 0x26 0xf8 [C-CV]
+[RX]  0xfa 0x11 0x02 0x14 0x45 0x6d 0x00 0x0c 0x00 0x00 0x02 0x14 0x07 0x00 0x00 0x14 0x06 0x20 0xf8 [C-CV]
+[RX]  0xfa 0x11 0x02 0x14 0x45 0x6d 0x00 0x0f 0x00 0x00 0x02 0x14 0x07 0x00 0x00 0x14 0x06 0x23 0xf8 [C-CV]
+
+[TX]  0xfa 0x02 0x00 0x00 0x00 0x00 0x00 0x00 0x02 0xf8 [Stop]
+[TX]  0xfa 0x06 0x00 0x00 0x00 0x00 0x00 0x00 0x06 0xf8 [Disconnect]
+
+
+Prettying wireshark captures
+ grep --no-filename --before=35 "usb\.capdata" *.json | grep "src\|capdata" | sed "s/\"usb\.src\": \"host\",/host -> dev/" | sed "s/\"usb\.src\": \"1\.52\.[0-9]\",/host <- dev/" | sed "s/\"usb\.capdata\": //" | tr -s '\n' '#'| sed "s/\"#/\n/g" | tr -d '#"'
+
+
 """
 
 if __name__ == "__main__":
   main()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
